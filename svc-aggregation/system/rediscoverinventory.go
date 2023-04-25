@@ -79,7 +79,10 @@ func (e *ExternalInterface) RediscoverSystemInventory(ctx context.Context, devic
 	target.Password = decryptedPasswordByte
 
 	// get the plugin information
-	plugin, errs := agmodel.GetPluginData(target.PluginID)
+	a := agmodel.A{
+		Newclient: agmodel.New,
+	}
+	plugin, errs := agmodel.GetPluginData(target.PluginID, a)
 	if errs != nil {
 		genError(ctx, errs.Error(), &resp, http.StatusBadRequest, errors.ResourceNotFound, map[string]string{
 			"Content-type": "application/json; charset=utf-8",
@@ -261,7 +264,10 @@ func (e *ExternalInterface) getTargetSystemCollection(ctx context.Context, targe
 	}
 	target.Password = decryptedPasswordByte
 	// get the plugin information
-	plugin, errs := agmodel.GetPluginData(target.PluginID)
+	a := agmodel.A{
+		Newclient: agmodel.New,
+	}
+	plugin, errs := agmodel.GetPluginData(target.PluginID, a)
 	if errs != nil {
 		l.LogWithFields(ctx).Error(errs.Error())
 		return nil, errs
