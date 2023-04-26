@@ -81,7 +81,7 @@ type ExternalInterface struct {
 	CreateChildTask          func(context.Context, string, string) (string, error)
 	CreateTask               func(context.Context, string) (string, error)
 	UpdateTask               func(context.Context, common.TaskData) error
-	CreateSubscription       func(context.Context, []string)
+	CreateSubcription        func(context.Context, []string)
 	PublishEvent             func(context.Context, []string, string)
 	PublishEventMB           func(context.Context, string, string, string)
 	GetPluginStatus          func(context.Context, agmodel.Plugin) bool
@@ -90,12 +90,12 @@ type ExternalInterface struct {
 	DecryptPassword          func([]byte) ([]byte, error)
 	DeleteComputeSystem      func(int, string) *errors.Error
 	DeleteSystem             func(string) *errors.Error
-	DeleteEventSubscription  func(context.Context, string, string) (*eventsproto.EventSubResponse, error)
-	EventNotification        func(context.Context, string, string, string)
+	DeleteEventSubscription  func(context.Context, string) (*eventsproto.EventSubResponse, error)
+	EventNotification        func(context.Context, string, string, string, agmessagebus.MQBusCommunicator) error
 	GetAllKeysFromTable      func(context.Context, string) ([]string, error)
 	GetConnectionMethod      func(context.Context, string) (agmodel.ConnectionMethod, *errors.Error)
 	UpdateConnectionMethod   func(agmodel.ConnectionMethod, string) *errors.Error
-	GetPluginMgrAddr         func(string) (agmodel.Plugin, *errors.Error)
+	GetPluginMgrAddr         func(string, agmodel.DBPluginDataRead) (agmodel.Plugin, *errors.Error)
 	GetAggregationSourceInfo func(context.Context, string) (agmodel.AggregationSource, *errors.Error)
 	GenericSave              func([]byte, string, string) error
 	CheckActiveRequest       func(string) (bool, *errors.Error)
@@ -114,29 +114,29 @@ type responseStatus struct {
 }
 
 type getResourceRequest struct {
-	Data               []byte
-	Username           string
-	Password           string
-	SystemID           string
-	DeviceUUID         string
-	DeviceInfo         interface{}
-	LoginCredentials   map[string]string
-	ParentOID          string
-	OID                string
-	ContactClient      func(context.Context, string, string, string, string, interface{}, map[string]string) (*http.Response, error)
-	OemFlag            bool
-	Plugin             agmodel.Plugin
-	TaskRequest        string
-	HTTPMethodType     string
-	Token              string
-	StatusPoll         bool
-	CreateSubscription func(context.Context, []string)
-	PublishEvent       func(context.Context, []string, string)
-	GetPluginStatus    func(context.Context, agmodel.Plugin) bool
-	UpdateFlag         bool
-	TargetURI          string
-	UpdateTask         func(context.Context, common.TaskData) error
-	BMCAddress         string
+	Data              []byte
+	Username          string
+	Password          string
+	SystemID          string
+	DeviceUUID        string
+	DeviceInfo        interface{}
+	LoginCredentials  map[string]string
+	ParentOID         string
+	OID               string
+	ContactClient     func(context.Context, string, string, string, string, interface{}, map[string]string) (*http.Response, error)
+	OemFlag           bool
+	Plugin            agmodel.Plugin
+	TaskRequest       string
+	HTTPMethodType    string
+	Token             string
+	StatusPoll        bool
+	CreateSubcription func(context.Context, []string)
+	PublishEvent      func(context.Context, []string, string)
+	GetPluginStatus   func(context.Context, agmodel.Plugin) bool
+	UpdateFlag        bool
+	TargetURI         string
+	UpdateTask        func(context.Context, common.TaskData) error
+	BMCAddress        string
 }
 
 type respHolder struct {
@@ -755,7 +755,7 @@ func (h *respHolder) getStorageInfo(ctx context.Context, progress int32, alotted
 	// Read system data from DB
 	systemURI := strings.Replace(req.OID, "/Storage", "", -1)
 	systemURI = strings.Replace(systemURI, "/Systems/", "/Systems/"+req.DeviceUUID+".", -1)
-	data, dbErr := agmodel.GetResource(context.TODO(), "ComputerSystem", systemURI)
+	data, dbErr := agmodel.GetResource(ctx, "ComputerSystem", systemURI)
 	if dbErr != nil {
 		errMsg := fmt.Errorf("error while getting the systems data %v", dbErr.Error())
 		return "", progress, errMsg
@@ -839,7 +839,7 @@ func createServerSearchIndex(ctx context.Context, computeSystem map[string]inter
 
 	// saving the firmware version
 	if !strings.Contains(oidKey, "/Storage") {
-		firmwareVersion, _ := getFirmwareVersion(oidKey, deviceUUID)
+		firmwareVersion, _ := getFirmwareVersion(ctx, oidKey, deviceUUID)
 		searchForm["FirmwareVersion"] = firmwareVersion
 	}
 
@@ -1119,7 +1119,7 @@ func updateManagerName(data []byte, pluginID string) []byte {
 	return data
 }
 
-func getFirmwareVersion(oid, deviceUUID string) (string, error) {
+func getFirmwareVersion(ctx context.Context, oid, deviceUUID string) (string, error) {
 	strArray := strings.Split(oid, "/")
 	id := strArray[len(strArray)-1]
 	key := strings.Replace(oid, "/"+id, "/"+deviceUUID+".", -1)
@@ -1130,7 +1130,7 @@ func getFirmwareVersion(oid, deviceUUID string) (string, error) {
 	} else if len(keys) == 0 {
 		return "", fmt.Errorf("Manager data is not available")
 	}
-	data, dberr := agmodel.GetResource(context.TODO(), "Managers", keys[0])
+	data, dberr := agmodel.GetResource(ctx, "Managers", keys[0])
 	if dberr != nil {
 		return "", fmt.Errorf("while getting the managers data: %v", dberr.Error())
 	}
@@ -1178,7 +1178,8 @@ func CreateDefaultEventSubscription(ctx context.Context, systemID []string) {
 // PublishEvent will publish default events
 func PublishEvent(ctx context.Context, systemIDs []string, collectionName string) {
 	for i := 0; i < len(systemIDs); i++ {
-		agmessagebus.Publish(ctx, systemIDs[i], "ResourceAdded", collectionName)
+		MQ := agmessagebus.InitMQSCom()
+		agmessagebus.Publish(ctx, systemIDs[i], "ResourceAdded", collectionName, MQ)
 	}
 }
 
@@ -1189,7 +1190,8 @@ func PublishPluginStatusOKEvent(ctx context.Context, plugin string, msgQueues []
 		PluginID:  plugin,
 		EMBQueues: msgQueues,
 	}
-	if err := agmessagebus.PublishCtrlMsg(common.SubscribeEMB, data); err != nil {
+	MQ := agmessagebus.InitMQSCom()
+	if err := agmessagebus.PublishCtrlMsg(common.SubscribeEMB, data, MQ); err != nil {
 		l.LogWithFields(ctx).Error("failed to publish resubscribe to " + plugin + " EMB event: " + err.Error())
 		return
 	}
